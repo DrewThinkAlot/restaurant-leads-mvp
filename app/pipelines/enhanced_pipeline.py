@@ -42,11 +42,8 @@ class EnhancedPipelineRunner(PipelineRunner):
         try:
             # Step 1: Use current pipeline for reliable data fetching
             logger.info("Step 1: Fetching data with direct APIs...")
-            api_result = self.run_complete_pipeline(
-                max_candidates=max_candidates,
-                harris_only=harris_only,
-                use_stable_apis=use_stable_apis
-            )
+            # Use API-only path directly to avoid run_complete_pipeline dependency
+            api_result = self._run_api_pipeline(max_candidates)
 
             if not api_result.get("execution_success", False):
                 logger.warning("API pipeline failed, falling back to AI-only mode")
@@ -78,11 +75,7 @@ class EnhancedPipelineRunner(PipelineRunner):
             logger.error(f"Hybrid pipeline failed: {e}")
             # Fallback to API-only pipeline
             logger.info("Falling back to API-only pipeline...")
-            return self.run_complete_pipeline(
-                max_candidates=max_candidates,
-                harris_only=harris_only,
-                use_stable_apis=use_stable_apis
-            )
+            return self._run_api_pipeline(max_candidates)
 
     def _convert_candidates_for_ai(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert database candidates to AI agent format."""
@@ -149,28 +142,6 @@ class EnhancedPipelineRunner(PipelineRunner):
                     enhanced_candidates = candidates  # Return original if AI fails
             else:
                 enhanced_candidates = result
-
-            # Step 4: AI Enhancement Phase
-            if use_ai_enhancement and self.vllm_available:
-                print("🤖 Running AI enhancement...")
-                
-                # Skip Contact Discovery for now - ContactFinder disabled
-                # ContactFinder agent disabled temporarily
-                candidates_for_ai = candidates
-                
-                # Run RestaurantLeadsCrew
-                crew = RestaurantLeadsCrew()
-                ai_results = crew.run_pipeline(candidates_for_ai)
-                
-                # Merge AI results with API data
-                enhanced_leads = self._merge_ai_results(candidates_for_ai, ai_results)
-                return {
-                    'leads': enhanced_leads,
-                    'total_candidates': len(candidates),
-                    'qualified_leads': len([l for l in enhanced_leads if l.get('confidence_0_1', 0) > 0.7]),
-                    'api_success': True,
-                    'ai_enhancement': True
-                }
 
             return {
                 "enhanced_candidates": enhanced_candidates if isinstance(enhanced_candidates, list) else [enhanced_candidates],

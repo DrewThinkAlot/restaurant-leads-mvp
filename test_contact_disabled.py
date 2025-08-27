@@ -9,7 +9,7 @@ from pathlib import Path
 # Add app directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.pipelines.run_pipeline import PipelineRunner
+from app.pipelines.enhanced_pipeline import EnhancedPipelineRunner
 import time
 
 def test_pipeline_without_contact_finding():
@@ -17,12 +17,12 @@ def test_pipeline_without_contact_finding():
     print("🍕 Testing Pipeline with Contact Finding DISABLED")
     print("=" * 60)
 
-    runner = PipelineRunner()
+    runner = EnhancedPipelineRunner()
     start_time = time.time()
 
     print("🚀 Running pipeline with 3 candidates...")
     try:
-        result = runner.run_complete_pipeline(max_candidates=3, harris_only=True)
+        result = runner.run_hybrid_pipeline(max_candidates=3, harris_only=True, use_ai_enhancement=False)
         execution_time = time.time() - start_time
 
         print()

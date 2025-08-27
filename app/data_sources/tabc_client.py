@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 class TABCClient(BaseAPIClient):
     """Client for TABC data via Texas Open Data (Socrata/SODA)."""
     
-    PENDING_DATASET = "mxm5-tdpj"  # Pending Originals (Early Signal)
-    ISSUED_DATASET = "7hf9-qc9f"   # Issued Licenses
+    PENDING_DATASET = "kguh-7q9z"  # TABCLicenses - working dataset
+    ISSUED_DATASET = "7hf9-qc9f"   # TABC License Information
     
     def __init__(self, app_token: Optional[str] = None):
         super().__init__(
@@ -45,9 +45,9 @@ class TABCClient(BaseAPIClient):
         
         logger.info("Fetching TABC pending applications")
         
-        # Minimal SODA query - start with basic limit only
+        # Use optimal batch sizes for Socrata API
         params = {
-            "$limit": min(50, limit // 2),  # Very small batches
+            "$limit": min(1000, limit // 2),  # Optimal batch size for performance
             "$offset": 0
         }
         
@@ -56,7 +56,7 @@ class TABCClient(BaseAPIClient):
         
         while total_fetched < limit:
             params["$offset"] = offset
-            params["$limit"] = min(500, limit - total_fetched)
+            params["$limit"] = min(1000, limit - total_fetched)  # Optimal batch size
             
             try:
                 endpoint = f"{self.PENDING_DATASET}.json"
@@ -112,9 +112,9 @@ class TABCClient(BaseAPIClient):
         
         logger.info("Fetching TABC issued licenses")
         
-        # Minimal SODA query - start with basic limit only
+        # Use optimal batch sizes for Socrata API
         params = {
-            "$limit": min(50, limit // 2),  # Very small batches
+            "$limit": min(1000, limit // 2),  # Optimal batch size for performance
             "$offset": 0
         }
         
@@ -123,7 +123,7 @@ class TABCClient(BaseAPIClient):
         
         while total_fetched < limit:
             params["$offset"] = offset
-            params["$limit"] = min(500, limit - total_fetched)
+            params["$limit"] = min(1000, limit - total_fetched)  # Optimal batch size
             
             try:
                 endpoint = f"{self.ISSUED_DATASET}.json"
@@ -190,28 +190,28 @@ class TABCClient(BaseAPIClient):
         # Common normalization
         normalized = {
             "source": source,
-            "source_id": raw_record.get("aims_application_number") or raw_record.get("license_number"),
+            "source_id": raw_record.get("aimslicenseid"),
             "source_url": f"https://data.texas.gov/resource/{raw_record.get('_dataset')}.json",
             "raw_data": raw_record,
             "fetched_at": raw_record.get("_fetched_at"),
             
-            # Venue details
-            "venue_name": self._clean_text(raw_record.get("trade_name") or raw_record.get("tradename", "")),
-            "legal_name": None,  # Not available in TABC data
-            "address": self._clean_text(raw_record.get("address", "")),
-            "city": self._clean_text(raw_record.get("city", "")),
+            # Venue details - map from actual dataset fields
+            "venue_name": self._clean_text(raw_record.get("aimstradename", "")),
+            "legal_name": None,  # Not available in this dataset
+            "address": self._clean_text(raw_record.get("locationaddress", "")),
+            "city": self._extract_city_from_address(raw_record.get("locationaddress", "")),
             "state": "TX",
-            "zip_code": self._clean_text(raw_record.get("zip", "")),
-            "county": "Harris",
+            "zip_code": self._extract_zip_from_address(raw_record.get("locationaddress", "")),
+            "county": "Harris",  # Default to Harris County
             
             # TABC-specific signals
-            "license_type": raw_record.get("license_type"),
-            "status": raw_record.get("status"),
-            "owner_name": self._clean_text(raw_record.get("owner") or raw_record.get("owner_name") or raw_record.get("licensee_name", "")),
+            "license_type": raw_record.get("aimslicensetype"),
+            "status": raw_record.get("status", "Active"),  # Default to Active if not specified
+            "owner_name": self._clean_text(raw_record.get("aimsownername", "")),
             
-            # Dates
-            "application_date": self._parse_date(raw_record.get("application_date")),
-            "issue_date": self._parse_date(raw_record.get("issue_date")),
+            # Dates (may not be available in all datasets)
+            "application_date": None,
+            "issue_date": None,
             
             # Lead scoring signals
             "signal_strength": self._calculate_signal_strength(raw_record, source),
@@ -275,18 +275,26 @@ class TABCClient(BaseAPIClient):
             return ""
         return text.strip().title()
     
-    def _parse_date(self, date_str: str) -> Optional[str]:
-        """Parse date string to ISO format."""
-        if not date_str:
+    def _extract_city_from_address(self, address: str) -> str:
+        """Extract city from address string."""
+        if not address:
+            return "Houston"  # Default
+        
+        # Simple heuristic - look for common Houston area cities
+        address_lower = address.lower()
+        cities = ["houston", "katy", "sugar land", "pearland", "missouri city", "cypress", "tomball"]
+        
+        for city in cities:
+            if city in address_lower:
+                return city.title()
+        
+        return "Houston"  # Default
+    
+    def _extract_zip_from_address(self, address: str) -> Optional[str]:
+        """Extract ZIP code from address string."""
+        if not address:
             return None
         
-        try:
-            # Handle common Socrata date formats
-            if 'T' in date_str:
-                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-            else:
-                dt = datetime.strptime(date_str, '%Y-%m-%d')
-            return dt.isoformat()
-        except (ValueError, TypeError):
-            logger.warning(f"Could not parse date: {date_str}")
-            return None
+        import re
+        zip_match = re.search(r'\b(\d{5}(?:-\d{4})?)\b', address)
+        return zip_match.group(1) if zip_match else None

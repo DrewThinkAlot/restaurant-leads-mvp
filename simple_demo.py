@@ -50,9 +50,9 @@ def show_setup_steps():
     print("   python test_api_integration.py")
 
     print("\n4. 🚀 Run pipeline:")
-    print("   from app.pipelines.run_pipeline import PipelineRunner")
-    print("   runner = PipelineRunner()")
-    print("   result = runner.run_complete_pipeline(use_stable_apis=True)")
+    print("   from app.pipelines.enhanced_pipeline import EnhancedPipelineRunner")
+    print("   runner = EnhancedPipelineRunner()")
+    print("   result = runner.run_hybrid_pipeline(use_stable_apis=True, use_ai_enhancement=True)")
 
 def show_sample_output():
     """Show what the CSV output looks like."""

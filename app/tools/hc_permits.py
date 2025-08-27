@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 import logging
 from urllib.parse import urljoin
 import re
+import asyncio
+from playwright.async_api import async_playwright, Page as AsyncPage, Browser as AsyncBrowser
 
 from ..settings import settings
 
@@ -56,6 +58,38 @@ class HarrisCountyPermitsClient:
         
         return self._deduplicate_permits(results)
     
+    async def search_permits_async(self, 
+                                 search_terms: List[str] = None, 
+                                 date_from: datetime = None,
+                                 date_to: datetime = None,
+                                 permit_types: List[str] = None) -> List[Dict[str, Any]]:
+        """Search for permits using async web interface."""
+        if not search_terms:
+            search_terms = ["restaurant", "food service", "tenant build-out"]
+        if not date_from:
+            date_from = datetime.now() - timedelta(days=90)
+        if not date_to:
+            date_to = datetime.now()
+        
+        results = []
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                # set_default_timeout is a synchronous method on async Page
+                page.set_default_timeout(self.timeout)
+                
+                for search_term in search_terms:
+                    permits = await self._search_single_term_async(page, search_term, date_from, date_to)
+                    results.extend(permits)
+                    await asyncio.sleep(self.delay)
+            except Exception as e:
+                logger.error(f"Error during async Harris County permit search: {e}")
+            finally:
+                await browser.close()
+        
+        return self._deduplicate_permits(results)
+
     def get_permit_details(self, permit_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific permit."""
         
@@ -123,6 +157,47 @@ class HarrisCountyPermitsClient:
             logger.error(f"Error searching for '{search_term}': {e}")
             return []
     
+    async def _search_single_term_async(self, page: AsyncPage, search_term: str, 
+                                      date_from: datetime, date_to: datetime) -> List[Dict[str, Any]]:
+        """Perform async search for a single term."""
+        try:
+            await page.goto(f"{self.base_url}/permits/search")
+            await page.fill('input[name="search"]', search_term)
+            await page.fill('input[name="date_from"]', date_from.strftime('%m/%d/%Y'))
+            await page.fill('input[name="date_to"]', date_to.strftime('%m/%d/%Y'))
+            await page.click('button[type="submit"]')
+            await page.wait_for_load_state('networkidle')
+            
+            results = []
+            result_rows = await page.query_selector_all('table.permits-table tbody tr')
+            
+            for row in result_rows:
+                permit_data = await self._extract_permit_from_row_async(row)
+                if permit_data and self._is_restaurant_related(permit_data):
+                    results.append(permit_data)
+            
+            next_button = await page.query_selector('a.next-page')
+            page_count = 1
+            
+            while next_button and page_count < 10:
+                await next_button.click()
+                await page.wait_for_load_state('networkidle')
+                
+                additional_rows = await page.query_selector_all('table.permits-table tbody tr')
+                for row in additional_rows:
+                    permit_data = await self._extract_permit_from_row_async(row)
+                    if permit_data and self._is_restaurant_related(permit_data):
+                        results.append(permit_data)
+                
+                next_button = await page.query_selector('a.next-page')
+                page_count += 1
+                await asyncio.sleep(self.delay)
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error searching async for '{search_term}': {e}")
+            return []
+
     def _extract_permit_from_row(self, row) -> Optional[Dict[str, Any]]:
         """Extract permit data from table row."""
         
@@ -154,6 +229,34 @@ class HarrisCountyPermitsClient:
             logger.warning(f"Error extracting permit data from row: {e}")
             return None
     
+    async def _extract_permit_from_row_async(self, row) -> Optional[Dict[str, Any]]:
+        """Extract permit data from table row asynchronously."""
+        try:
+            cells = await row.query_selector_all('td')
+            if len(cells) < 5:
+                return None
+            
+            permit_data = {
+                'source': 'hc_permits',
+                'permit_id': (await cells[0].inner_text()).strip(),
+                'permit_type': (await cells[1].inner_text()).strip(),
+                'description': (await cells[2].inner_text()).strip(),
+                'address': (await cells[3].inner_text()).strip(),
+                'status': (await cells[4].inner_text()).strip(),
+                'application_date': self._parse_date((await cells[5].inner_text()).strip()) if len(cells) > 5 else None,
+                'issued_date': self._parse_date((await cells[6].inner_text()).strip()) if len(cells) > 6 else None,
+                'applicant': (await cells[7].inner_text()).strip() if len(cells) > 7 else None,
+                'scraped_at': datetime.now().isoformat()
+            }
+            
+            description = permit_data['description'].lower()
+            permit_data['business_type'] = self._extract_business_type(description)
+            
+            return permit_data
+        except Exception as e:
+            logger.warning(f"Error extracting permit data from async row: {e}")
+            return None
+
     def _fetch_permit_details(self, page: Page, permit_id: str) -> Optional[Dict[str, Any]]:
         """Fetch detailed permit information."""
         
@@ -271,6 +374,23 @@ class HarrisCountyPermitsClient:
 def search_restaurant_permits(days_back: int = 90) -> List[Dict[str, Any]]:
     """Search for restaurant-related permits in Harris County."""
     
+    # Run the async function in a dedicated event loop to avoid RuntimeError
+    # when called from contexts where an event loop may already be running.
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        permits = loop.run_until_complete(search_restaurant_permits_async(days_back))
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+    
+    return permits
+
+async def search_restaurant_permits_async(days_back: int = 90) -> List[Dict[str, Any]]:
+    """Search for restaurant-related permits in Harris County asynchronously."""
     client = HarrisCountyPermitsClient()
     
     search_terms = [
@@ -281,6 +401,6 @@ def search_restaurant_permits(days_back: int = 90) -> List[Dict[str, Any]]:
     ]
     
     date_from = datetime.now() - timedelta(days=days_back)
-    permits = client.search_permits(search_terms=search_terms, date_from=date_from)
+    permits = await client.search_permits_async(search_terms=search_terms, date_from=date_from)
     
     return permits

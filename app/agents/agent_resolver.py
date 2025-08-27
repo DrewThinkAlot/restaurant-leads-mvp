@@ -23,7 +23,9 @@ class LLMMatchingTool(BaseTool):
         try:
             llm = get_llm(temperature=0.1, max_tokens=300)
             
-            with open("/Users/admin/CascadeProjects/restaurant-leads-mvp/app/prompts/resolver.md", "r") as f:
+            import os
+            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "resolver.md")
+            with open(prompt_path, "r") as f:
                 prompt_template = f.read()
             
             prompt = prompt_template.format(record1=record1, record2=record2)

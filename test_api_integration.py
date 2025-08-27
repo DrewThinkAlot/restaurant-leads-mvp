@@ -20,7 +20,7 @@ from app.data_sources.tabc_client import TABCClient
 from app.data_sources.houston_health_client import HoustonHealthClient
 from app.data_sources.harris_permits_client import HarrisPermitsClient
 from app.data_sources.comptroller_client import ComptrollerClient
-from app.pipelines.run_pipeline import PipelineRunner
+from app.pipelines.enhanced_pipeline import EnhancedPipelineRunner
 
 def test_env_setup():
     """Test environment variables and API keys."""
@@ -188,13 +188,14 @@ def test_pipeline_integration():
     print("\n🔄 Testing pipeline integration...")
 
     try:
-        runner = PipelineRunner()
+        runner = EnhancedPipelineRunner()
 
         # Test with small batch
-        print("Running pipeline with stable APIs (small test batch)...")
-        result = runner.run_complete_pipeline(
+        print("Running enhanced hybrid pipeline (small test batch)...")
+        result = runner.run_hybrid_pipeline(
             max_candidates=20,
-            use_stable_apis=True
+            use_stable_apis=True,
+            use_ai_enhancement=True
         )
 
         print("✅ Pipeline completed successfully!")
@@ -300,7 +301,7 @@ def main():
     print("\n🎯 Next Steps:")
     print("   1. Fix any failing components")
     print("   2. Run: python test_api_integration.py")
-    print("   3. Then try: runner.run_complete_pipeline(use_stable_apis=True)")
+    print("   3. Then try: runner.run_hybrid_pipeline(use_stable_apis=True, use_ai_enhancement=True)")
 
     return all([manager_success, total_records > 0])
 

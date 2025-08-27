@@ -4,6 +4,8 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlencode
 import logging
 from datetime import datetime, timedelta
+import asyncio
+import httpx
 
 from ..settings import settings
 
@@ -21,7 +23,7 @@ class TABCOpenDataClient:
         
         # Dataset IDs - these would be discovered from actual Socrata site
         # Placeholders for now, to be replaced with actual dataset IDs
-        self.licenses_dataset = "tabc-licenses-applications"  # Replace with actual ID
+        self.licenses_dataset = "kguh-7q9z"  # TABCLicenses - working dataset
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -32,45 +34,76 @@ class TABCOpenDataClient:
         if self.app_token:
             self.session.headers['X-App-Token'] = self.app_token
     
-    def query_pending_licenses(self, county: str = "Harris", days_back: int = 90) -> List[Dict[str, Any]]:
-        """Query for pending license applications in specified county."""
+    async def query_pending_licenses_async(self, county: str = "Harris", days_back: int = 90) -> List[Dict[str, Any]]:
+        """Asynchronously query for pending license applications."""
         
         since_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
         
-        # SoQL query for pending applications
-        where_clause = f"county = '{county}' AND status LIKE '%Pending%' AND application_date >= '{since_date}'"
-        
-        params = {
-            '$where': where_clause,
-            '$order': 'application_date DESC',
-            '$limit': 1000,
-            '$offset': 0
-        }
-        
+        # Use simple fetch without parameters since dataset may not support filtering
         all_records = []
         offset = 0
+        limit = 1000
         
-        while True:
-            params['$offset'] = offset
-            
+        async with httpx.AsyncClient(headers=self._get_headers(), timeout=self.timeout) as client:
             try:
+                while len(all_records) < limit:
+                    params = {
+                        "$limit": min(1000, limit - len(all_records)),
+                        "$offset": offset
+                    }
+                    
+                    records = await self._make_request_async(client, f"/resource/{self.licenses_dataset}.json", params)
+                    
+                    if not records:
+                        break
+                    
+                    all_records.extend(records)
+                    offset += len(records)
+                    
+                    if len(records) < params["$limit"]:
+                        break
+                    
+                    await asyncio.sleep(self.delay)
+                    
+            except Exception as e:
+                logger.error(f"Error during async TABC query: {e}")
+                return []
+        
+        return self._normalize_tabc_records(all_records)
+
+    def query_pending_licenses(self, county: str = "Harris", days_back: int = 90) -> List[Dict[str, Any]]:
+        """Query for pending license applications."""
+        
+        since_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        
+        # Use simple fetch without parameters since dataset may not support filtering
+        all_records = []
+        offset = 0
+        limit = 1000
+        
+        try:
+            while len(all_records) < limit:
+                params = {
+                    "$limit": min(1000, limit - len(all_records)),
+                    "$offset": offset
+                }
+                
                 records = self._make_request(f"/resource/{self.licenses_dataset}.json", params)
                 
                 if not records:
                     break
                 
                 all_records.extend(records)
+                offset += len(records)
                 
-                # Check if we got a full page
-                if len(records) < params['$limit']:
+                if len(records) < params["$limit"]:
                     break
                 
-                offset += params['$limit']
                 time.sleep(self.delay)
                 
-            except Exception as e:
-                logger.error(f"Error querying TABC data: {e}")
-                break
+        except Exception as e:
+            logger.error(f"Error querying TABC data: {e}")
+            return []
         
         return self._normalize_tabc_records(all_records)
     
@@ -133,6 +166,52 @@ class TABCOpenDataClient:
         
         return None
     
+    async def _fetch_all_pages_async(self, client: httpx.AsyncClient, endpoint: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Fetch all pages of results for a given query asynchronously."""
+        all_records = []
+        offset = 0
+        limit = params.get('$limit', 1000)
+
+        while True:
+            params['$offset'] = offset
+            try:
+                records = await self._make_request_async(client, endpoint, params)
+                if not records:
+                    break
+                
+                all_records.extend(records)
+                
+                if len(records) < limit:
+                    break
+                
+                offset += limit
+                await asyncio.sleep(self.delay)
+
+            except Exception as e:
+                logger.error(f"Error during async pagination: {e}")
+                break
+        
+        return all_records
+
+    async def _make_request_async(self, client: httpx.AsyncClient, endpoint: str, params: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        """Make an asynchronous HTTP request."""
+        url = f"{self.base_url}{endpoint}"
+        query_string = urlencode(params, safe='$:')
+        full_url = f"{url}?{query_string}"
+
+        for attempt in range(3):
+            try:
+                response = await client.get(full_url)
+                response.raise_for_status()
+                return response.json()
+            except httpx.RequestError as e:
+                logger.warning(f"Async request attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    raise
+        return None
+
     def _normalize_tabc_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Normalize TABC records to common format."""
         
@@ -166,6 +245,16 @@ class TABCOpenDataClient:
         
         return normalized
     
+    def _get_headers(self) -> Dict[str, str]:
+        """Get headers for HTTP requests."""
+        headers = {
+            'User-Agent': settings.user_agent,
+            'Accept': 'application/json'
+        }
+        if self.app_token:
+            headers['X-App-Token'] = self.app_token
+        return headers
+
     def discover_datasets(self) -> List[Dict[str, Any]]:
         """Discover available TABC-related datasets."""
         
@@ -207,9 +296,23 @@ tabc_client = TABCOpenDataClient()
 def get_pending_restaurant_licenses(county: str = "Harris", days_back: int = 90) -> List[Dict[str, Any]]:
     """Get pending restaurant/food service licenses."""
     
-    records = tabc_client.query_pending_licenses(county, days_back)
+    # Run the async function in sync context
+    try:
+        import asyncio
+        records = asyncio.run(get_pending_restaurant_licenses_async(county, days_back))
+    except RuntimeError:
+        # If event loop is already running (e.g., in Jupyter), use nest_asyncio or fallback
+        import nest_asyncio
+        nest_asyncio.apply()
+        records = asyncio.run(get_pending_restaurant_licenses_async(county, days_back))
     
-    # Filter for restaurant-related licenses
+    return records
+
+
+async def get_pending_restaurant_licenses_async(county: str = "Harris", days_back: int = 90) -> List[Dict[str, Any]]:
+    """Asynchronously get pending restaurant/food service licenses."""
+    records = await tabc_client.query_pending_licenses_async(county, days_back)
+    
     restaurant_keywords = [
         'restaurant', 'food', 'mixed beverage', 'wine', 'beer', 
         'retail', 'on premise', 'caterer'
@@ -222,5 +325,5 @@ def get_pending_restaurant_licenses(county: str = "Harris", days_back: int = 90)
         
         if any(keyword in license_type or keyword in business_name for keyword in restaurant_keywords):
             filtered_records.append(record)
-    
+            
     return filtered_records

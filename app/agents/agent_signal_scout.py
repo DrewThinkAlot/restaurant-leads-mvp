@@ -6,8 +6,8 @@ import asyncio
 import logging
 from datetime import datetime
 
-from ..tools.tabc_open_data import get_pending_restaurant_licenses
-from ..tools.hc_permits import search_restaurant_permits  
+from ..tools.tabc_open_data import get_pending_restaurant_licenses, get_pending_restaurant_licenses_async
+from ..tools.hc_permits import search_restaurant_permits, search_restaurant_permits_async
 from ..tools.hc_food_permits import search_food_permits_by_candidate
 from ..tools.socrata_mcp import discover_and_query_datasets
 from ..db import db_manager
@@ -121,58 +121,65 @@ class SignalScoutAgent:
         )
     
     def execute_discovery(self, max_candidates: int = 100) -> List[Dict[str, Any]]:
-        """Execute discovery across all sources."""
+        """Execute discovery across all sources synchronously."""
+        return asyncio.run(self.execute_discovery_async(max_candidates))
+
+    async def execute_discovery_async(self, max_candidates: int = 100) -> List[Dict[str, Any]]:
+        """Execute discovery across all sources asynchronously and in parallel."""
+        
+        logger.info("Starting parallel discovery...")
+        
+        tasks = [
+            get_pending_restaurant_licenses_async("Harris", 90),
+            search_restaurant_permits_async(90),
+            discover_and_query_datasets("Harris")
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
         all_candidates = []
         
-        # TABC pending licenses
-        logger.info("Searching TABC data...")
-        try:
-            tabc_records = get_pending_restaurant_licenses("Harris", 90)
-            for record in tabc_records:
+        # Process TABC results
+        if not isinstance(results[0], Exception):
+            logger.info(f"Found {len(results[0])} TABC records.")
+            for record in results[0]:
                 candidate = self._convert_tabc_to_candidate(record)
                 if candidate:
                     all_candidates.append(candidate)
                     self._store_raw_record("tabc", record)
-        except Exception as e:
-            logger.error(f"TABC search failed: {e}")
-        
-        # Harris County permits
-        logger.info("Searching Harris County permits...")
-        try:
-            hc_permits = search_restaurant_permits(90)
-            for permit in hc_permits:
+        else:
+            logger.error(f"TABC search failed: {results[0]}")
+
+        # Process Harris County permits results
+        if not isinstance(results[1], Exception):
+            logger.info(f"Found {len(results[1])} HC permits.")
+            for permit in results[1]:
                 candidate = self._convert_permit_to_candidate(permit)
                 if candidate:
                     all_candidates.append(candidate)
                     self._store_raw_record("hc_permits", permit)
-        except Exception as e:
-            logger.error(f"HC permits search failed: {e}")
-        
-        # Socrata MCP discovery (optional)
-        logger.info("Trying Socrata MCP discovery...")
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                socrata_results = loop.run_until_complete(discover_and_query_datasets("Harris"))
-                for result in socrata_results:
-                    candidate = self._convert_socrata_to_candidate(result)
-                    if candidate:
-                        all_candidates.append(candidate)
-                        self._store_raw_record("socrata_mcp", result)
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.warning(f"Socrata MCP discovery failed: {e}")
-        
+        else:
+            logger.error(f"HC permits search failed: {results[1]}")
+
+        # Process Socrata MCP results
+        if not isinstance(results[2], Exception):
+            logger.info(f"Found {len(results[2])} Socrata records.")
+            for result in results[2]:
+                candidate = self._convert_socrata_to_candidate(result)
+                if candidate:
+                    all_candidates.append(candidate)
+                    self._store_raw_record("socrata_mcp", result)
+        else:
+            logger.warning(f"Socrata MCP discovery failed: {results[2]}")
+
         # Deduplicate and limit
         unique_candidates = self._deduplicate_candidates(all_candidates)
+        logger.info(f"Found {len(unique_candidates)} unique candidates after deduplication.")
         
         return unique_candidates[:max_candidates]
-    
+
     def _convert_tabc_to_candidate(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Convert TABC record to candidate format."""
+        """Convert TABC record to candidate format.""" 
         
         try:
             return {
@@ -293,20 +300,29 @@ class SignalScoutAgent:
         """Remove obvious duplicates."""
         
         unique_candidates = []
-        seen_addresses = set()
-        seen_names = set()
+        seen_keys = set()
         
         for candidate in candidates:
             address = candidate.get("address", "").lower().strip()
             name = candidate.get("venue_name", "").lower().strip()
-            
-            # Simple deduplication by address or name
-            key = f"{address}|{name}"
-            
-            if key not in seen_addresses and address and name:
+            source = candidate.get("source", "")
+
+            # Build a robust dedup key using whatever identifiers are available
+            parts = [source]
+            if address:
+                parts.append(address)
+            if name:
+                parts.append(name)
+            # Also consider source_id when present
+            src_id = str(candidate.get("source_id") or "").lower().strip()
+            if src_id:
+                parts.append(src_id)
+            key = "|".join(parts)
+
+            # Keep candidates that have at least a name or an address
+            if (address or name) and key not in seen_keys:
                 unique_candidates.append(candidate)
-                seen_addresses.add(key)
-                seen_names.add(name)
+                seen_keys.add(key)
         
         return unique_candidates
     
@@ -317,7 +333,14 @@ class SignalScoutAgent:
             with db_manager.get_session() as session:
                 raw_record = RawRecord(
                     source=source,
-                    source_id=str(data.get("source_id") or data.get("id", "")),
+                    # Prefer common id fields across sources
+                    source_id=str(
+                        data.get("source_id")
+                        or data.get("permit_id")
+                        or data.get("license_number")
+                        or data.get("id")
+                        or ""
+                    ),
                     raw_json=data,
                     fetched_at=datetime.now()
                 )

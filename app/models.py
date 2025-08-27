@@ -59,13 +59,13 @@ class Candidate(Base):
     suite = Column(String(50))
     city = Column(String(100), nullable=False, index=True)
     state = Column(String(2), default="TX")
-    zip_code = Column(String(10))
-    county = Column(String(50), default="Harris")
-    phone = Column(String(20))
-    email = Column(String(200))
+    zip_code = Column(String(10), index=True)
+    county = Column(String(50), default="Harris", index=True)
+    phone = Column(String(20), index=True)
+    email = Column(String(200), index=True)
     source_flags = Column(JSON, default=dict)
-    first_seen = Column(DateTime, default=datetime.utcnow)
-    last_seen = Column(DateTime, default=datetime.utcnow)
+    first_seen = Column(DateTime, default=datetime.utcnow, index=True)
+    last_seen = Column(DateTime, default=datetime.utcnow, index=True)
     
     # Relationships
     signals = relationship("Signal", back_populates="candidate")
@@ -99,10 +99,10 @@ class ETAInference(Base):
     candidate_id = Column(UUID, ForeignKey("candidates.candidate_id"), nullable=False)
     eta_start = Column(DateTime, nullable=False)
     eta_end = Column(DateTime, nullable=False)
-    eta_days = Column(Float, nullable=False)
-    confidence_0_1 = Column(Float, nullable=False)
+    eta_days = Column(Float, nullable=False, index=True)
+    confidence_0_1 = Column(Float, nullable=False, index=True)
     rationale_text = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
     # Relationships
     candidate = relationship("Candidate", back_populates="eta_inferences")
@@ -114,17 +114,17 @@ class Contact(Base):
     
     id = Column(UUID, primary_key=True, default=uuid.uuid4)
     candidate_id = Column(UUID, ForeignKey("candidates.candidate_id"), nullable=False)
-    full_name = Column(String(200), nullable=False)
-    role = Column(String(50))  # owner|managing_member|operating_partner|gm|unknown
-    email = Column(String(200))
-    phone = Column(String(20))
-    source = Column(String(50), nullable=False)  # tabc|comptroller|permit|site|pattern
+    full_name = Column(String(200), nullable=False, index=True)
+    role = Column(String(50), index=True)  # owner|managing_member|operating_partner|gm|unknown
+    email = Column(String(200), index=True)
+    phone = Column(String(20), index=True)
+    source = Column(String(50), nullable=False, index=True)  # tabc|comptroller|permit|site|pattern
     source_url = Column(String(500), nullable=False)
     provenance_text = Column(Text, nullable=False)
-    confidence_0_1 = Column(Float, nullable=False)
+    confidence_0_1 = Column(Float, nullable=False, index=True)
     contactability = Column(JSON, default=dict)  # ok_to_email/call/sms flags
     notes = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
     # Relationships
     candidate = relationship("Candidate", back_populates="contacts")
@@ -140,8 +140,13 @@ class Lead(Base):
     pitch_text = Column(Text)
     how_to_pitch = Column(Text)
     sms_text = Column(String(160))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     
+    # Fields for feedback loop
+    actual_opening_date = Column(DateTime, nullable=True, index=True)
+    feedback_status = Column(String(50), nullable=True, index=True) # e.g., 'Opened on time', 'Opened late', 'Did not open'
+    feedback_notes = Column(Text, nullable=True)
+
     # Relationships
     candidate = relationship("Candidate", back_populates="leads")

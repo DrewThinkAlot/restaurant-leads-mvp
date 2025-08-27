@@ -39,11 +39,11 @@ case "${1:-api}" in
         wait_for_model_server
         init_database
         python3 -c "
-from app.pipelines.run_pipeline import PipelineRunner
+from app.pipelines.enhanced_pipeline import EnhancedPipelineRunner
 import json
 
-runner = PipelineRunner()
-result = runner.run_complete_pipeline(max_candidates=50)
+runner = EnhancedPipelineRunner()
+result = runner.run_hybrid_pipeline(max_candidates=50)
 print(json.dumps(result, indent=2))
 "
         ;;
@@ -56,17 +56,17 @@ print(json.dumps(result, indent=2))
         exec python3 -c "
 import time
 import logging
-from app.pipelines.run_pipeline import PipelineRunner
+from app.pipelines.enhanced_pipeline import EnhancedPipelineRunner
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-runner = PipelineRunner()
+runner = EnhancedPipelineRunner()
 
 while True:
     try:
-        logger.info('Running incremental pipeline update...')
-        result = runner.run_incremental_update(days_back=1)
+        logger.info('Running enhanced hybrid pipeline update...')
+        result = runner.run_hybrid_pipeline(max_candidates=200)
         logger.info(f'Update complete: {result[\"qualified_leads\"]} leads')
     except Exception as e:
         logger.error(f'Pipeline update failed: {e}')

@@ -1,0 +1,2 @@
+venue_name,legal_name,address,city,state,zip_code,phone,email,confidence_score,estimated_open_date,source_flags,pitch_text,contact_info,lead_quality,export_timestamp
+Taqueria Jalisco Mex - Texas,,2322  1/2 Wirt Rd,Houston,TX,,,,,,"{""primary_source"": ""houston_health"", ""cross_source_signals"": [], ""composite_lead_score"": 0.48, ""api_sourced"": true}",,{},D - Very Low Confidence,2025-08-27T14:03:22.562365

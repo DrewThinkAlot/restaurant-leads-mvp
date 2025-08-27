@@ -267,7 +267,9 @@ class ExtractorAgent:
         try:
             llm = get_llm(temperature=0.1, max_tokens=800)
             
-            with open("/Users/admin/CascadeProjects/restaurant-leads-mvp/app/prompts/extractor.md", "r") as f:
+            import os
+            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "extractor.md")
+            with open(prompt_path, "r") as f:
                 prompt_template = f.read()
             
             prompt = prompt_template.format(raw_data=json.dumps(problematic_data, indent=2))

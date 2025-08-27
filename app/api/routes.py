@@ -10,7 +10,7 @@ from ..schemas import (
     CandidateCreate, LeadCreate, HealthCheck
 )
 from ..models import Candidate, Lead, Signal, ETAInference, Contact
-from ..pipelines.run_pipeline import PipelineRunner
+from ..pipelines.enhanced_pipeline import EnhancedPipelineRunner
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +30,11 @@ async def run_pipeline(
     try:
         logger.info(f"Starting pipeline with max_candidates={request.max_candidates}")
         
-        # Initialize pipeline runner
-        runner = PipelineRunner()
+        # Initialize enhanced pipeline runner
+        runner = EnhancedPipelineRunner()
         
-        # Execute pipeline
-        result = runner.run_complete_pipeline(
+        # Execute enhanced pipeline (defaults: use_stable_apis=True, use_ai_enhancement=True)
+        result = runner.run_hybrid_pipeline(
             max_candidates=request.max_candidates,
             harris_only=request.harris_only
         )

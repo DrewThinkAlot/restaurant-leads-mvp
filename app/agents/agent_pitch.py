@@ -23,7 +23,9 @@ class LLMPitchGenerationTool(BaseTool):
         try:
             llm = get_llm(temperature=0.3, max_tokens=600)
             
-            with open("/Users/admin/CascadeProjects/restaurant-leads-mvp/app/prompts/pitch.md", "r") as f:
+            import os
+            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "pitch.md")
+            with open(prompt_path, "r") as f:
                 prompt_template = f.read()
             
             prompt = prompt_template.format(

@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 import re
 
@@ -14,6 +14,18 @@ class ETARuleResult:
     rule_name: str
     signals_used: List[str]
     rationale_text: str = ""  # Optional rationale text
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "eta_start": self.eta_start.isoformat(),
+            "eta_end": self.eta_end.isoformat(),
+            "eta_days": self.eta_days,
+            "confidence_0_1": self.confidence_0_1,
+            "rule_name": self.rule_name,
+            "signals_used": self.signals_used,
+            "rationale_text": self.rationale_text
+        }
 
 
 class ETARulesEngine:
@@ -28,8 +40,10 @@ class ETARulesEngine:
         rules = [
             self._rule_high_probability_ship,
             self._rule_final_inspection_scheduled,
+            self._rule_strong_early_signal,
             self._rule_medium_tabc_pending,
-            self._rule_medium_plan_review_building
+            self._rule_medium_plan_review_building,
+            self._rule_health_plan_review_only,
         ]
         
         results = []
@@ -49,31 +63,25 @@ class ETARulesEngine:
         
         return None
     
-    def _rule_high_probability_ship(self, candidate_data: Dict, signals: Dict) -> Optional[ETARuleResult]:
-        """TABC Original Pending + HCPH plan review approved within 45 days."""
+    def _rule_high_probability_ship(self, candidate_data: Dict[str, Any], signals: Dict[str, Any]) -> Optional[ETARuleResult]:
+        """High probability ship rule - very recent applications with positive signals."""
         
-        tabc_status = signals.get('tabc_status', '').lower()
-        health_status = signals.get('health_status', '').lower()
-        milestone_dates = signals.get('milestone_dates', {})
+        tabc_status = (signals.get('tabc_status') or '').lower()
+        permit_status = (signals.get('permit_status') or '').lower()
+        inspection_result = (signals.get('inspection_result') or '').lower()
         
         if 'original' not in tabc_status or 'pending' not in tabc_status:
             return None
         
-        if 'approved' not in health_status:
+        if 'approved' not in signals.get('health_status', '').lower():
             return None
         
         # Check if plan review approved within last 45 days
-        plan_approved_date = None
-        for date_key, date_str in milestone_dates.items():
-            if 'plan' in date_key.lower() and 'approved' in date_key.lower():
-                try:
-                    plan_approved_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    break
-                except:
-                    continue
+        milestone_dates = signals.get('milestone_dates', {})
+        plan_approved_date = self._get_latest_milestone_date(milestone_dates, ['plan', 'approved'])
         
         if plan_approved_date:
-            days_since_approval = (self.today - plan_approved_date).days
+            days_since_approval = (self.today.date() - plan_approved_date.date()).days
             if days_since_approval <= 45:
                 return ETARuleResult(
                     eta_start=self.today + timedelta(days=30),
@@ -86,6 +94,31 @@ class ETARulesEngine:
         
         return None
     
+    def _rule_strong_early_signal(self, candidate_data: Dict, signals: Dict) -> Optional[ETARuleResult]:
+        """Rule for strong early signals like tenant build-out + TABC application."""
+        
+        permit_types = signals.get('permit_types', [])
+        tabc_status = (signals.get('tabc_status') or '').lower()
+        milestone_dates = signals.get('milestone_dates', {})
+        
+        # Check for early-stage permits
+        has_early_permit = any('tenant build-out' in p.lower() or 'new construction' in p.lower() for p in permit_types)
+        
+        # Check for recent TABC application
+        if has_early_permit and 'pending' in tabc_status:
+            application_date = self._get_latest_milestone_date(milestone_dates, ['application', 'filed'])
+            if application_date and (self.today.date() - application_date.date()).days <= 60:
+                return ETARuleResult(
+                    eta_start=self.today + timedelta(days=60),
+                    eta_end=self.today + timedelta(days=120),
+                    eta_days=90,
+                    confidence_0_1=0.70,
+                    rule_name="strong_early_signal",
+                    signals_used=["early_permit", "tabc_pending_recent"]
+                )
+        
+        return None
+
     def _rule_final_inspection_scheduled(self, candidate_data: Dict, signals: Dict) -> Optional[ETARuleResult]:
         """Final inspection scheduled OR CO pending/scheduled."""
         
@@ -130,32 +163,38 @@ class ETARulesEngine:
     def _rule_medium_tabc_pending(self, candidate_data: Dict, signals: Dict) -> Optional[ETARuleResult]:
         """TABC Original Pending only, age <= 60 days."""
         
-        tabc_status = signals.get('tabc_status', '').lower()
+        tabc_status = (signals.get('tabc_status') or '').lower()
         tabc_dates = signals.get('tabc_dates', {})
         
         if 'original' not in tabc_status or 'pending' not in tabc_status:
             return None
         
         # Check age of TABC application
-        application_date = None
-        for date_key, date_str in tabc_dates.items():
-            if 'application' in date_key.lower() or 'filed' in date_key.lower():
-                try:
-                    application_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    break
-                except:
-                    continue
+        application_date = self._get_latest_milestone_date(tabc_dates, ['application', 'filed'])
         
         if application_date:
-            days_since_application = (self.today - application_date).days
-            if days_since_application <= 60:
+            days_since_application = (self.today.date() - application_date.date()).days
+            
+            # Tiered confidence based on application age
+            if days_since_application <= 30:
+                # Newer applications have a wider, more distant ETA
+                return ETARuleResult(
+                    eta_start=self.today + timedelta(days=45),
+                    eta_end=self.today + timedelta(days=90),
+                    eta_days=67,
+                    confidence_0_1=0.65,
+                    rule_name="medium_tabc_pending_new",
+                    signals_used=["tabc_original_pending_new"]
+                )
+            elif days_since_application <= 75:
+                # Older applications are closer to opening
                 return ETARuleResult(
                     eta_start=self.today + timedelta(days=30),
-                    eta_end=self.today + timedelta(days=75),
-                    eta_days=52,
-                    confidence_0_1=0.6,
-                    rule_name="medium_tabc_pending",
-                    signals_used=["tabc_original_pending"]
+                    eta_end=self.today + timedelta(days=60),
+                    eta_days=45,
+                    confidence_0_1=0.60,
+                    rule_name="medium_tabc_pending_aged",
+                    signals_used=["tabc_original_pending_aged"]
                 )
         
         return None
@@ -170,25 +209,45 @@ class ETARulesEngine:
         if 'plan' not in health_status or 'review' not in health_status:
             return None
         
-        # Look for building permit
-        has_building_permit = False
-        for permit_type in permit_types:
-            if 'building' in permit_type.lower() or 'tenant' in permit_type.lower():
-                has_building_permit = True
-                break
+        # Look for building permit and its age
+        building_permit_date = self._get_latest_milestone_date(milestone_dates, ['building', 'tenant'])
+        has_building_permit = any('building' in p.lower() or 'tenant' in p.lower() for p in permit_types)
         
-        if has_building_permit:
-            return ETARuleResult(
-                eta_start=self.today + timedelta(days=45),
-                eta_end=self.today + timedelta(days=90),
-                eta_days=67,
-                confidence_0_1=0.55,
-                rule_name="medium_plan_review_building",
-                signals_used=["hcph_plan_review", "building_permit"]
-            )
+        if has_building_permit and building_permit_date:
+            days_since_permit = (self.today.date() - building_permit_date.date()).days
+            
+            if days_since_permit <= 60:
+                return ETARuleResult(
+                    eta_start=self.today + timedelta(days=45),
+                    eta_end=self.today + timedelta(days=90),
+                    eta_days=67,
+                    confidence_0_1=0.55,
+                    rule_name="medium_plan_review_building",
+                    signals_used=["hcph_plan_review", "building_permit"]
+                )
         
         return None
-    
+
+    def _rule_health_plan_review_only(self, candidate_data: Dict, signals: Dict) -> Optional[ETARuleResult]:
+        """Rule for recent health department plan review approval."""
+
+        health_status = signals.get('health_status', '').lower()
+        milestone_dates = signals.get('milestone_dates', {})
+
+        if 'plan_review_approved' in health_status:
+            approval_date = self._get_latest_milestone_date(milestone_dates, ['plan', 'approved'])
+            if approval_date and (self.today.date() - approval_date.date()).days <= 45:
+                return ETARuleResult(
+                    eta_start=self.today + timedelta(days=45),
+                    eta_end=self.today + timedelta(days=90),
+                    eta_days=67,
+                    confidence_0_1=0.60,
+                    rule_name="health_plan_review_only",
+                    signals_used=["hcph_plan_approved_recent"]
+                )
+
+        return None
+
     def _apply_downweight_factors(self, candidate_data: Dict, signals: Dict) -> float:
         """Apply down-weighting factors based on negative signals."""
         
@@ -213,8 +272,8 @@ class ETARulesEngine:
                 break
         
         # TABC inactive/denied
-        tabc_status = signals.get('tabc_status', '').lower()
-        if any(term in tabc_status for term in ['inactive', 'denied', 'rejected', 'cancelled']):
+        tabc_status = (signals.get('tabc_status') or '').lower()
+        if any(term in tabc_status for term in ['inactive', 'denied', 'rejected', 'cancelled', 'withdrawn']):
             multiplier *= 0.5
         
         return max(multiplier, 0.1)  # Minimum 10% confidence
@@ -229,6 +288,20 @@ class ETARulesEngine:
         sixty_days_out = self.today + timedelta(days=60)
         
         return eta_result.eta_start <= sixty_days_out
+
+    def _get_latest_milestone_date(self, dates: Dict, keywords: List[str]) -> Optional[datetime]:
+        """Get the latest date from a dictionary of dates based on keywords."""
+        latest_date = None
+        for date_key, date_str in dates.items():
+            if any(keyword in date_key.lower() for keyword in keywords):
+                try:
+                    # Handle timezone-aware and naive datetimes
+                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    if latest_date is None or dt > latest_date:
+                        latest_date = dt
+                except (ValueError, TypeError):
+                    continue
+        return latest_date
 
 
 def parse_milestone_text(text: str) -> Dict[str, str]:

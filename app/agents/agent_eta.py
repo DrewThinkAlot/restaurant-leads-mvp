@@ -24,7 +24,9 @@ class LLMETAAdjustmentTool(BaseTool):
         try:
             llm = get_llm(temperature=0.2, max_tokens=400)
             
-            with open("/Users/admin/CascadeProjects/restaurant-leads-mvp/app/prompts/eta.md", "r") as f:
+            import os
+            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "eta.md")
+            with open(prompt_path, "r") as f:
                 prompt_template = f.read()
             
             prompt = prompt_template.format(
@@ -41,12 +43,40 @@ class LLMETAAdjustmentTool(BaseTool):
             return rule_result  # Return original if LLM fails
 
 
+class LLMBatchETAAdjustmentTool(BaseTool):
+    """Tool for batch LLM-based ETA adjustment."""
+    
+    name: str = "llm_batch_eta_adjust"
+    description: str = "Use LLM to adjust a batch of ETA predictions"
+
+    def _run(self, batch_inputs: str) -> str:
+        """Execute batch LLM ETA adjustment."""
+        try:
+            llm = get_llm(temperature=0.2, max_tokens=4096)  # Increased tokens for batch
+            
+            import os
+            prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "eta_batch.md")
+            with open(prompt_path, "r") as f:
+                prompt_template = f.read()
+            
+            prompt = prompt_template.format(batch_inputs=batch_inputs)
+            
+            response = llm._call(prompt)
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"LLM batch ETA adjustment failed: {e}")
+            # On failure, return an empty JSON array string
+            return json.dumps([])
+
+
 class ETAAgent:
     """Agent for estimating restaurant opening dates using rules + LLM adjustment."""
     
     def __init__(self):
         self.rules_engine = ETARulesEngine()
-        self.tools = [LLMETAAdjustmentTool()]
+        self.tools = [LLMETAAdjustmentTool(), LLMBatchETAAdjustmentTool()]
         
         self.agent = Agent(
             role="ETA Estimator",
@@ -69,35 +99,64 @@ class ETAAgent:
         
         logger.info(f"Estimating ETAs for {len(resolved_candidates)} candidates")
         
-        qualified_candidates = []
+        # Batch process all candidates
+        final_eta_results = self._estimate_batch_candidates(resolved_candidates)
         
-        for candidate in resolved_candidates:
-            try:
-                eta_result = self._estimate_single_candidate(candidate)
+        qualified_candidates = []
+        for candidate, eta_result in zip(resolved_candidates, final_eta_results):
+            if eta_result and self.rules_engine.should_create_lead(eta_result):
+                candidate_with_eta = candidate.copy()
+                candidate_with_eta["eta_result"] = {
+                    "eta_start": eta_result.eta_start.isoformat(),
+                    "eta_end": eta_result.eta_end.isoformat(),
+                    "eta_days": eta_result.eta_days,
+                    "confidence_0_1": eta_result.confidence_0_1,
+                    "rationale_text": eta_result.rule_name,
+                    "signals_considered": eta_result.signals_used
+                }
+                qualified_candidates.append(candidate_with_eta)
                 
-                if eta_result and self.rules_engine.should_create_lead(eta_result):
-                    candidate_with_eta = candidate.copy()
-                    candidate_with_eta["eta_result"] = {
-                        "eta_start": eta_result.eta_start.isoformat(),
-                        "eta_end": eta_result.eta_end.isoformat(),
-                        "eta_days": eta_result.eta_days,
-                        "confidence_0_1": eta_result.confidence_0_1,
-                        "rationale_text": eta_result.rule_name,
-                        "signals_considered": eta_result.signals_used
-                    }
-                    qualified_candidates.append(candidate_with_eta)
-                    
-                    logger.info(f"Qualified candidate: {candidate['venue_name']} "
-                              f"(ETA: {eta_result.eta_days} days, "
-                              f"Confidence: {eta_result.confidence_0_1:.2f})")
-                
-            except Exception as e:
-                logger.warning(f"ETA estimation failed for {candidate.get('venue_name')}: {e}")
-                continue
+                logger.info(f"Qualified candidate: {candidate['venue_name']} "
+                          f"(ETA: {eta_result.eta_days} days, "
+                          f"Confidence: {eta_result.confidence_0_1:.2f})")
         
         logger.info(f"ETA estimation complete: {len(qualified_candidates)} qualified")
         
         return qualified_candidates
+
+    def _estimate_batch_candidates(self, candidates: List[Dict[str, Any]]) -> List[Any]:
+        """Estimate ETA for a batch of candidates."""
+        
+        # 1. Apply deterministic rules to all candidates
+        rule_results = []
+        for candidate in candidates:
+            signals = self._extract_signals_data(candidate)
+            rule_result = self.rules_engine.evaluate_candidate(candidate, signals)
+            rule_results.append(rule_result)
+
+        # 2. Identify candidates needing LLM adjustment
+        llm_batch_inputs = []
+        indices_for_llm = []
+        for i, (candidate, rule_result) in enumerate(zip(candidates, rule_results)):
+            if rule_result:
+                signals = self._extract_signals_data(candidate)
+                milestone_text = self._extract_milestone_text(candidate, signals)
+                if milestone_text and len(milestone_text.strip()) > 20:
+                    llm_batch_inputs.append({
+                        "candidate_id": i,
+                        "rule_result": rule_result.to_dict(),
+                        "milestone_text": milestone_text
+                    })
+                    indices_for_llm.append(i)
+
+        # 3. Apply LLM adjustment in a single batch call
+        final_results = list(rule_results) # Start with rule results
+        if llm_batch_inputs:
+            adjusted_results = self._apply_batch_llm_adjustment(llm_batch_inputs, rule_results)
+            for i, adjusted_result in adjusted_results.items():
+                final_results[i] = adjusted_result
+
+        return final_results
     
     def _estimate_single_candidate(self, candidate: Dict[str, Any]) -> Any:
         """Estimate ETA for a single candidate."""
@@ -190,6 +249,38 @@ class ETAAgent:
         
         return "\n".join(text_parts)
     
+    def _apply_batch_llm_adjustment(self, batch_inputs: List[Dict], original_rule_results: List) -> Dict[int, Any]:
+        """Apply LLM adjustment to a batch of candidates."""
+        try:
+            batch_tool = LLMBatchETAAdjustmentTool()
+            response_str = batch_tool._run(json.dumps(batch_inputs))
+            
+            adjusted_json = json.loads(response_str)
+            
+            adjusted_results = {}
+            for item in adjusted_json:
+                candidate_id = item.get("candidate_id")
+                if candidate_id is None:
+                    continue
+                
+                original_result = original_rule_results[candidate_id]
+                if not original_result:
+                    continue
+
+                # Validate and create adjusted ETARuleResult
+                adjusted_result = self._create_validated_adjusted_result(item, original_result)
+                adjusted_results[candidate_id] = adjusted_result
+                
+                logger.info(f"LLM batch adjusted ETA for candidate {candidate_id}: "
+                           f"{original_result.eta_days} -> {adjusted_result.eta_days} days, "
+                           f"confidence: {original_result.confidence_0_1:.2f} -> {adjusted_result.confidence_0_1:.2f}")
+
+            return adjusted_results
+
+        except Exception as e:
+            logger.warning(f"LLM batch adjustment failed, using rule results: {e}")
+            return {}
+
     def _apply_llm_adjustment(self, rule_result, milestone_text: str):
         """Apply LLM adjustment to rule-based ETA."""
         
@@ -276,6 +367,42 @@ class ETAAgent:
         except Exception as e:
             logger.warning(f"LLM adjustment failed, using rule result: {e}")
             return rule_result
+
+    def _create_validated_adjusted_result(self, llm_output: Dict, original_result: Any) -> Any:
+        """Validate LLM output and create an ETARuleResult."""
+        
+        # Validate adjustments are within allowed range
+        original_days = original_result.eta_days
+        adjusted_days = llm_output.get("eta_days", original_days)
+        if abs(adjusted_days - original_days) > 15:
+            adjusted_days = original_days + (15 if adjusted_days > original_days else -15)
+
+        original_confidence = original_result.confidence_0_1
+        adjusted_confidence = llm_output.get("confidence_0_1", original_confidence)
+        if abs(adjusted_confidence - original_confidence) > 0.1:
+            adjusted_confidence = original_confidence + (0.1 if adjusted_confidence > original_confidence else -0.1)
+        
+        # Ensure confidence is within bounds
+        adjusted_confidence = max(0.0, min(1.0, adjusted_confidence))
+
+        # Create adjusted result
+        from ..rules import ETARuleResult
+        
+        day_delta = adjusted_days - original_result.eta_days
+        adjusted_eta_start = original_result.eta_start + timedelta(days=day_delta)
+        adjusted_eta_end = original_result.eta_end + timedelta(days=day_delta)
+        
+        adjusted_result = ETARuleResult(
+            eta_start=adjusted_eta_start,
+            eta_end=adjusted_eta_end,
+            eta_days=int(adjusted_days),
+            confidence_0_1=adjusted_confidence,
+            rule_name=f"{original_result.rule_name}_llm_batch_adjusted",
+            signals_used=llm_output.get("signals_considered", original_result.signals_used)
+        )
+        adjusted_result.rationale_text = llm_output.get("rationale_text", "LLM batch adjustment applied")
+        
+        return adjusted_result
     
     def get_eta_summary_stats(self, candidates_with_eta: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Get summary statistics for ETA predictions."""

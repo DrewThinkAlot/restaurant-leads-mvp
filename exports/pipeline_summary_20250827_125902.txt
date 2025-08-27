@@ -1,0 +1,10 @@
+RESTAURANT LEADS PIPELINE SUMMARY
+==================================================
+
+Export Timestamp: 2025-08-27T12:59:02.905780
+
+PIPELINE RESULTS:
+- Total Leads: 0
+- Qualified Leads: 0
+- AI Enhancement: False
+.2f

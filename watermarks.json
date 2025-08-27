@@ -1,24 +1,24 @@
 {
   "tabc": {
-    "last_update": "2025-08-27T15:19:25.756785",
-    "updated_at": "2025-08-27T15:19:25.756799",
+    "last_update": "2025-08-27T20:01:31.480045",
+    "updated_at": "2025-08-27T20:01:31.480122",
     "metadata": {
-      "last_fetch_records": 4,
-      "last_fetch_duration": 0.9305531978607178,
-      "last_fetch_timestamp": "2025-08-27T15:19:25.757176",
-      "total_fetches": 1,
-      "total_records": 4
+      "last_fetch_records": 0,
+      "last_fetch_duration": 1.9073486328125e-05,
+      "last_fetch_timestamp": "2025-08-27T20:03:09.117578",
+      "total_fetches": 3,
+      "total_records": 2
     }
   },
   "houston_health": {
-    "last_update": "2025-08-27T15:19:25.544118",
-    "updated_at": "2025-08-27T15:19:25.544137",
+    "last_update": "2025-08-27T20:03:09.827392",
+    "updated_at": "2025-08-27T20:03:09.827462",
     "metadata": {
-      "last_fetch_records": 5,
-      "last_fetch_duration": 0.7178699970245361,
-      "last_fetch_timestamp": "2025-08-27T15:19:25.544674",
+      "last_fetch_records": 1,
+      "last_fetch_duration": 0.7104918956756592,
+      "last_fetch_timestamp": "2025-08-27T20:03:09.828149",
       "total_fetches": 1,
-      "total_records": 5
+      "total_records": 1
     }
   },
   "harris_permits": {
@@ -26,9 +26,9 @@
     "updated_at": "2025-08-27T06:02:02.546339",
     "metadata": {
       "last_fetch_records": 0,
-      "last_fetch_duration": 0.26125097274780273,
-      "last_fetch_timestamp": "2025-08-27T15:19:25.088177",
-      "total_fetches": 43,
+      "last_fetch_duration": 0.37741994857788086,
+      "last_fetch_timestamp": "2025-08-27T20:03:09.495456",
+      "total_fetches": 70,
       "total_records": 0
     }
   }

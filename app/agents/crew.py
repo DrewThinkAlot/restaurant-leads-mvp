@@ -169,13 +169,27 @@ class RestaurantLeadsCrew:
             }
             
         except Exception as e:
-            logger.error(f"Crew execution failed: {e}")
+            error_msg = str(e)
+            logger.error(f"Crew execution failed: {error_msg}")
+            
+            # Handle specific CrewAI errors
+            if "'list' object has no attribute 'rstrip'" in error_msg:
+                logger.error("CrewAI data processing error: List passed where string expected")
+                logger.error("This may be caused by empty data or CrewAI library issue")
+                return {
+                    "leads": [],
+                    "total_candidates": 0,
+                    "qualified_leads": 0,
+                    "execution_success": False,
+                    "error": "CrewAI processing error: List object passed where string expected. This may indicate empty data sources or a CrewAI library compatibility issue."
+                }
+            
             return {
                 "leads": [],
                 "total_candidates": 0,
                 "qualified_leads": 0,
                 "execution_success": False,
-                "error": str(e)
+                "error": error_msg
             }
     
     def get_crew_status(self) -> Dict[str, Any]:

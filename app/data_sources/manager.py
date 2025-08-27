@@ -5,6 +5,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Generator
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 
@@ -41,6 +42,10 @@ class DataSourceManager:
         
         if self.comptroller_client:
             self.clients["comptroller"] = self.comptroller_client
+        
+        # Initialize cache for API responses
+        self.cache = {}  # Key: (source_name, since, limit) -> (timestamp, records)
+        self.cache_ttl = 600  # 10 minutes TTL
     
     def fetch_all_sources(self, limit_per_source: int = 1000, 
                          parallel: bool = True) -> Dict[str, List[Dict[str, Any]]]:
@@ -52,18 +57,19 @@ class DataSourceManager:
         results = {}
         
         if parallel:
-            # Parallel execution
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_source = {
-                    executor.submit(self._fetch_source_with_watermark, source_name, client, limit_per_source): source_name
-                    for source_name, client in self.clients.items()
-                    if source_name != "comptroller"  # Comptroller is for enrichment only
-                }
-                
+            # Optimized parallel execution with increased workers and better resource management
+            with ThreadPoolExecutor(max_workers=8) as executor:  # Increased from 4 to 8
+                future_to_source = {}
+                for source_name, client in self.clients.items():
+                    if source_name != "comptroller":  # Comptroller is for enrichment only
+                        future = executor.submit(self._fetch_source_with_watermark, source_name, client, limit_per_source)
+                        future_to_source[future] = source_name
+
+                # Process completed futures with better error handling
                 for future in as_completed(future_to_source):
                     source_name = future_to_source[future]
                     try:
-                        source_records = future.result()
+                        source_records = future.result(timeout=300)  # 5 minute timeout
                         results[source_name] = source_records
                         logger.info(f"Fetched {len(source_records)} records from {source_name}")
                     except Exception as e:
@@ -99,6 +105,19 @@ class DataSourceManager:
         since = self.watermark_manager.get_incremental_window(source_name)
         logger.info(f"Fetching {source_name} since {since}")
         
+        # Generate cache key
+        cache_key = (source_name, str(since), limit)
+        
+        # Check cache
+        if cache_key in self.cache:
+            cached_timestamp, cached_records = self.cache[cache_key]
+            if time.time() - cached_timestamp < self.cache_ttl:
+                logger.info(f"Cache hit for {source_name}, returning {len(cached_records)} cached records")
+                return cached_records
+            else:
+                # Cache expired, remove it
+                del self.cache[cache_key]
+        
         records = []
         latest_timestamp = None
         
@@ -121,6 +140,10 @@ class DataSourceManager:
             
             # Store raw records in database
             self._store_raw_records(records)
+            
+            # Cache the results
+            self.cache[cache_key] = (time.time(), records)
+            logger.info(f"Cached {len(records)} records for {source_name}")
             
             return records
             
@@ -180,6 +203,7 @@ class DataSourceManager:
         
         seen_signatures = set()
         deduplicated = []
+        signature_to_index = {}
         duplicate_count = 0
         
         for record in records:
@@ -188,60 +212,55 @@ class DataSourceManager:
             if signature not in seen_signatures:
                 seen_signatures.add(signature)
                 deduplicated.append(record)
+                signature_to_index[signature] = len(deduplicated) - 1
             else:
                 duplicate_count += 1
-                # Keep track of cross-source signals
-                self._merge_duplicate_signals(deduplicated, record, signature)
+                self._merge_duplicate_signals(deduplicated, record, signature, signature_to_index)
         
         logger.info(f"Removed {duplicate_count} duplicates, kept {len(deduplicated)} unique records")
         
         return deduplicated
     
+    def _merge_duplicate_signals(self, deduplicated: List[Dict[str, Any]], 
+                                duplicate: Dict[str, Any], signature: str,
+                                signature_to_index: Dict[str, int]):
+        """Merge signals from duplicate record into existing record using direct index lookup."""
+        
+        existing_index = signature_to_index.get(signature)
+        if existing_index is not None and existing_index < len(deduplicated):
+            existing = deduplicated[existing_index]
+            
+            existing_sources = existing.get("cross_source_signals", [])
+            duplicate_source = duplicate.get("source")
+            
+            if duplicate_source not in existing_sources:
+                existing_sources.append(duplicate_source)
+                existing["cross_source_signals"] = existing_sources
+                
+                existing["composite_lead_score"] = min(
+                    existing.get("composite_lead_score", 0) + 0.2, 1.0
+                )
+    
     def _generate_record_signature(self, record: Dict[str, Any]) -> str:
         """Generate unique signature for deduplication."""
         
-        # Normalize address and name for matching
         venue_name = self._normalize_text(record.get("venue_name", ""))
         address = self._normalize_text(record.get("address", ""))
         
-        # Create signature from key fields
         signature_parts = [venue_name, address]
         signature_string = "|".join(filter(None, signature_parts))
         
         return hashlib.md5(signature_string.encode()).hexdigest()
     
     def _normalize_text(self, text: str) -> str:
-        """Normalize text for deduplication matching."""
         if not text:
             return ""
         
-        # Remove common business suffixes, normalize spacing
         text = text.upper().strip()
         text = text.replace("LLC", "").replace("INC", "").replace("CORP", "")
         text = " ".join(text.split())  # Normalize whitespace
         
         return text
-    
-    def _merge_duplicate_signals(self, deduplicated: List[Dict[str, Any]], 
-                                duplicate: Dict[str, Any], signature: str):
-        """Merge signals from duplicate record into existing record."""
-        
-        # Find existing record with same signature
-        for existing in deduplicated:
-            if self._generate_record_signature(existing) == signature:
-                # Merge source flags and boost composite score
-                existing_sources = existing.get("cross_source_signals", [])
-                duplicate_source = duplicate.get("source")
-                
-                if duplicate_source not in existing_sources:
-                    existing_sources.append(duplicate_source)
-                    existing["cross_source_signals"] = existing_sources
-                    
-                    # Boost score for cross-source validation
-                    existing["composite_lead_score"] = min(
-                        existing.get("composite_lead_score", 0) + 0.2, 1.0
-                    )
-                break
     
     def enrich_with_comptroller(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Enrich top records with Comptroller data."""
@@ -252,7 +271,6 @@ class DataSourceManager:
         
         logger.info("Enriching records with Comptroller data")
         
-        # Only enrich top-scoring records to avoid rate limits
         top_records = [r for r in records if r.get("composite_lead_score", 0) >= 0.5][:50]
         
         for record in top_records:
@@ -260,11 +278,9 @@ class DataSourceManager:
                 enrichment = self.comptroller_client.enrich_candidate(record)
                 record["comptroller_enrichment"] = enrichment
                 
-                # Boost score if we found legal entity info
-                if enrichment.get("legal_entity_info"):
-                    record["composite_lead_score"] = min(
-                        record.get("composite_lead_score", 0) + 0.1, 1.0
-                    )
+                record["composite_lead_score"] = min(
+                    record.get("composite_lead_score", 0) + 0.1, 1.0
+                )
                 
                 time.sleep(1.1)  # Rate limiting
                 
@@ -282,7 +298,6 @@ class DataSourceManager:
         
         logger.info(f"Exporting {len(records)} records to CSV: {output_path}")
         
-        # Define CSV columns for sales team
         csv_columns = [
             "venue_name", "address", "city", "state", "zip_code", 
             "owner_name", "composite_lead_score", "signal_strength",
@@ -297,16 +312,13 @@ class DataSourceManager:
             writer.writeheader()
             
             for record in records:
-                # Flatten nested data for CSV
                 csv_row = record.copy()
                 
-                # Handle estimated open window
                 open_window = record.get("estimated_open_window", {})
                 csv_row["estimated_min_days"] = open_window.get("min_days")
                 csv_row["estimated_max_days"] = open_window.get("max_days")
                 csv_row["confidence"] = open_window.get("confidence")
                 
-                # Handle cross-source signals
                 csv_row["cross_source_signals"] = ",".join(record.get("cross_source_signals", []))
                 
                 writer.writerow(csv_row)
@@ -317,22 +329,29 @@ class DataSourceManager:
     def _store_raw_records(self, records: List[Dict[str, Any]]):
         """Store raw records in database for audit trail."""
         
+        if not records:
+            return
+            
         try:
             with db_manager.get_session() as session:
-                for record in records:
-                    raw_record = RawRecord(
+                # Use bulk insert for better performance
+                raw_records = [
+                    RawRecord(
                         source=record.get("source"),
                         source_id=record.get("source_id", ""),
                         url=record.get("source_url"),
                         raw_json=record.get("raw_data", record),
                         fetched_at=datetime.utcnow()
                     )
-                    session.add(raw_record)
+                    for record in records
+                ]
                 
-                session.commit()
+                session.bulk_save_objects(raw_records)
+                # Commit is handled automatically by the context manager
                 
         except Exception as e:
             logger.error(f"Failed to store raw records: {e}")
+            # Don't raise - this is audit trail, not critical for pipeline
     
     def _get_source_priority(self, source_name: str) -> float:
         """Get priority weight for different sources."""
@@ -351,30 +370,32 @@ class DataSourceManager:
         
         score = 0.0
         
-        # Base signal strength from source
         signal_strength = record.get("signal_strength", 0.0)
         source_priority = self._get_source_priority(source_name)
         
         score += signal_strength * source_priority
         
-        # Recency boost
         record_date = self._extract_record_date(record)
         if record_date:
-            days_ago = (datetime.utcnow() - record_date).days
+            # Use timezone-aware datetime for consistent subtraction
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            if record_date.tzinfo is None:
+                # If record_date is naive, assume it's UTC
+                record_date = record_date.replace(tzinfo=timezone.utc)
+            days_ago = (now_utc - record_date).days
             if days_ago <= 7:
                 score += 0.3  # Very recent
             elif days_ago <= 30:
                 score += 0.2  # Recent
             elif days_ago <= 90:
-                score += 0.1  # Somewhat recent
+                score += 0.1  # Moderately recent
         
-        # Business name quality signals
         venue_name = record.get("venue_name", "").lower()
         quality_indicators = ["restaurant", "kitchen", "grill", "cafe", "bistro"]
         if any(indicator in venue_name for indicator in quality_indicators):
             score += 0.1
         
-        # Status-based scoring
         status_fields = ["status", "permit_status", "inspection_result"]
         for field in status_fields:
             status_value = record.get(field)

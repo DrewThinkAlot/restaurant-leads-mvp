@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).parent / 'app'))
 
 from data_sources.manager import DataSourceManager
-from pipelines.run_pipeline import PipelineRunner
+from pipelines.enhanced_pipeline import EnhancedPipelineRunner
 
 def demo_without_api_keys():
     """Demonstrate how the system works without real API calls."""
@@ -162,27 +162,23 @@ def demo_pipeline_runner():
     print("""
 # Once you have API keys set up, you can run:
 
-from app.pipelines.run_pipeline import PipelineRunner
+from app.pipelines.enhanced_pipeline import EnhancedPipelineRunner
 
-runner = PipelineRunner()
+runner = EnhancedPipelineRunner()
 
-# Use stable APIs (recommended)
-result = runner.run_complete_pipeline(
+# Use enhanced hybrid pipeline (recommended)
+result = runner.run_hybrid_pipeline(
     max_candidates=100,
-    use_stable_apis=True  # This uses the new API integration!
+    use_stable_apis=True,
+    use_ai_enhancement=True
 )
 
 print(f"Generated {result['qualified_leads']} leads")
-print(f"CSV export: {result['csv_export_path']}")
-
-# Legacy scraping (fallback)
-result_legacy = runner.run_complete_pipeline(
-    max_candidates=100,
-    use_stable_apis=False  # Uses original scraping approach
-)
+print(f"Total candidates: {result['total_candidates']}")
 
 # Get data source status
-status = runner.get_data_source_status()
+from app.pipelines.run_pipeline import PipelineRunner
+status = PipelineRunner().get_data_source_status()
 print("API health:", status)
 """)
 
