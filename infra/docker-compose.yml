@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # vLLM Model Server (GPU)
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model openai/gpt-oss-20b
+      --host 0.0.0.0 
+      --port 8000
+      --gpu-memory-utilization 0.90
+      --max-model-len 4096
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    networks:
+      - leads-network
+
+  # Main API Application
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    ports:
+      - "8080:8080"
+    environment:
+      - ENV=prod
+      - DB_URL=sqlite:///./leads.db
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - MODEL_ID=openai/gpt-oss-20b
+      - REQUESTS_TIMEOUT=30
+      - CRAWL_DELAY_SECONDS=1
+      - USER_AGENT=RestaurantLeadsMVP/1.0 (+https://example.local)
+    volumes:
+      - ../leads.db:/app/leads.db
+      - ../logs:/app/logs
+    depends_on:
+      vllm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - leads-network
+
+  # Background Pipeline Worker
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    command: ["worker"]
+    environment:
+      - ENV=prod
+      - DB_URL=sqlite:///./leads.db
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - MODEL_ID=openai/gpt-oss-20b
+      - REQUESTS_TIMEOUT=30
+      - CRAWL_DELAY_SECONDS=2
+      - USER_AGENT=RestaurantLeadsMVP/1.0 (+https://example.local)
+    volumes:
+      - ../leads.db:/app/leads.db
+      - ../logs:/app/logs
+    depends_on:
+      vllm:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - leads-network
+
+networks:
+  leads-network:
+    driver: bridge
+
+---
+# CPU-only version (alternative compose file: docker-compose.cpu.yml)
+version: '3.8'
+
+services:
+  # Ollama Model Server (CPU)
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - leads-network-cpu
+
+  # Main API Application (CPU)
+  api-cpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    ports:
+      - "8080:8080"
+    environment:
+      - ENV=prod
+      - DB_URL=sqlite:///./leads.db
+      - VLLM_BASE_URL=http://ollama:11434/v1
+      - MODEL_ID=gpt-oss:7b  # Smaller model for CPU
+      - REQUESTS_TIMEOUT=60  # Longer timeout for CPU inference
+      - CRAWL_DELAY_SECONDS=2
+      - USER_AGENT=RestaurantLeadsMVP/1.0 (+https://example.local)
+    volumes:
+      - ../leads.db:/app/leads.db
+      - ../logs:/app/logs
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - leads-network-cpu
+
+volumes:
+  ollama-data:
+
+networks:
+  leads-network-cpu:
+    driver: bridge
